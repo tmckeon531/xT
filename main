@@ -1,0 +1,141 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import matplotlib as mpl
+from mplsoccer.pitch import Pitch
+import seaborn as sns
+
+# Grab data and clean it
+
+events = pd.read_json('whyscout_data/events_England 2.json')
+teams = pd.read_json('whyscout_data/teams.json')
+players = pd.read_json('whyscout_data/players.json')
+tag_ids = pd.read_csv('whyscout_data/tags2name.csv')
+event_ids = pd.read_csv('whyscout_data/eventid2name.csv')
+players['name'] = players['firstName'] + ' ' +  players['lastName']
+events['playerId'].replace(to_replace = list(players.wyId), value = list(players.name), inplace = True)
+events['tags'] = events['tags'].astype(str).str.lstrip("[{'id': ").str.rstrip('}]').str.split("}, {'id': ")
+events['goal'] = 0
+mask1 = events.tags.apply(lambda x: '101' in x)
+events['goal'] = events[mask1]
+events['goal'].replace(9.0, np.nan, inplace = True)
+events['goal'].replace(3.0, 'Set Peice/Penalty', inplace = True)
+events['goal'].replace(10.0, 'Open Play', inplace = True)
+events['pass'] = 0
+mask2 = events.tags.apply(lambda x: '1801' in x)
+events['pass'] = events[mask2]
+events['pass'].replace(np.nan, 'unsuccessful', inplace = True)
+events['pass'].replace([8.0, 1.0, 3.0, 10.0, 7.0, 9.0], 'successful', inplace = True)
+events['positions'] = events['positions'].astype(str).str.replace("""}", " {'y': """, ',').str.replace(""", 'x': """, ',').str.replace("""}, {'y': """, ',').str.lstrip(""""[{'y': """).str.rstrip('}]"').str.split(',')
+events[['y', 'x', 'end_y', 'end_x']] = pd.DataFrame(events.positions.tolist())
+events2 = events[['eventName', 'playerId', 'x', 'y', 'end_x', 'end_y', 'eventSec', 'matchPeriod', 'goal', 'pass']]
+events3 = events2[(events2['eventName'] == 'Pass') | (events2['eventName'] == 'Shot')]
+events3[['x','y','end_x', 'end_y']] = events3[['x','y','end_x', 'end_y']].astype(int)
+shots = events3[events3['eventName'] == 'Shot']
+
+#create Zones and definitions
+
+zones = {}
+y = 0
+y1 = 0
+y2 = 25/3
+while y < 12:  
+    x = 0
+    x1 = 0
+    x2 = 6.25
+    while x < 16:
+        key = x + 16*y
+        value = [x1, x2, y1, y2]
+        zones[key] = value
+        x += 1
+        x1 += 6.25
+        x2 += 6.25
+    y += 1
+    y1 += 25/3
+    y2 += 25/3
+    
+def grab_actions_from_zone(data, zone_bounds):
+    zone_data = data[data['x'] >= zone_bounds[0]]
+    zone_data = zone_data[zone_data['x'] < zone_bounds[1]]
+    zone_data = zone_data[zone_data['y'] >= zone_bounds[2]]
+    zone_data = zone_data[zone_data['y'] < zone_bounds[3]]
+    return zone_data
+def shots_per_zone(data, zone_bounds):
+    zone_data = grab_pitches_from_zone(data, zone_bounds)
+    return (zone_data['eventName'].value_counts()['Shot'] / zone_data['eventName'].size)*100
+
+def grab_actions_ending_in_zone(data, zone_bounds):
+    zone_data = data[data['end_x'] >= zone_bounds[0]]
+    zone_data = zone_data[zone_data['end_x'] < zone_bounds[1]]
+    zone_data = zone_data[zone_data['end_y'] >= zone_bounds[2]]
+    zone_data = zone_data[zone_data['end_y'] < zone_bounds[3]]
+    return zone_data
+    
+# Create matrices
+
+S = []
+M = []
+G = []
+
+y = 0
+while y < 12:  
+    x = 0
+    shot_line = []
+    move_line = []
+    goal_line = []
+    while x < 16:
+        key = x + 16*y
+        df = grab_actions_from_zone(events3, zones[key])
+        shot_prob = df[df['eventName'] == 'Shot']['eventName'].count() / df.count()['eventName']
+        move_prob = 1 - shot_prob
+        shot_line.append(shot_prob)
+        move_line.append(move_prob)
+        shot = df[df['eventName'] == 'Shot']
+        goal_prob = shot[shot['goal'] == 'Open Play']['goal'].count() / shot['x'].count()
+        goal_line.append(goal_prob)
+        x += 1
+    S.append(shot_line)
+    M.append(move_line)
+    G.append(goal_line)
+    y += 1
+    
+S_matrix = np.array(S)
+G_matrix = np.array(G)
+
+xT1 = S_matrix * G_matrix
+
+def move_prob_per_zone(start_zone_df):
+    K = []
+    y = 0
+    while y < 12:  
+        x = 0
+        line = []
+        while x < 16:
+            key = x + 16*y
+            move = grab_actions_ending_in_zone(start_zone_df, zones[key])
+            move_prob = move['x'].count() / start_zone_df['x'].count()
+            line.append(move_prob)
+            x += 1
+        K.append(line)
+        y += 1
+        
+    return np.array(K)
+
+def iteration(current_xt):
+    P = []
+    y = 0
+    while y < 12:  
+        x = 0
+        line = []
+        while x < 16:
+            key = x + 16*y
+            zone_matrix = move_prob_per_zone(grab_actions_from_zone(events3, zones[key])) * current_xt
+            move_value = np.nansum(zone_matrix)
+            line.append(move_value)
+            x += 1
+        P.append(line)
+        y += 1
+
+    return (np.array(P)*M) + (np.array(G)*np.array(S))
+
+xT5 = iteration(iteration(iteration(iteration(xT1))))
